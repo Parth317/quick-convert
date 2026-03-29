@@ -1,30 +1,71 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
-import { FlatList, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, FlatList, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const AMOUNTS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 10000, 50000];
 
-const RATES: Record<string, number> = {
-  USD: 1,
-  EUR: 0.92,
-  GBP: 0.79,
-  JPY: 151.25,
-  VND: 25430,
-  AUD: 1.53,
-  CAD: 1.36,
-  CHF: 0.90,
-  NZD: 1.66
+// Absolute fallback just in case it's their very first time opening the app offline
+const ABSOLUTE_FALLBACK_RATES: Record<string, number> = {
+  USD: 1, EUR: 0.92, GBP: 0.79, JPY: 151.25, VND: 25430, AUD: 1.53, CAD: 1.36, CHF: 0.90, NZD: 1.66
 };
 
 export default function MainScreen() {
   const insets = useSafeAreaInsets();
 
   const [baseCurrency, setBaseCurrency] = useState('USD');
-  const [targetCurrency, setTargetCurrency] = useState('EUR');
+  const [targetCurrency, setTargetCurrency] = useState('VND');
+
+  const [rates, setRates] = useState<Record<string, number>>({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [isOffline, setIsOffline] = useState(false);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [selectingFor, setSelectingFor] = useState<'base' | 'target'>('target');
+
+  // THE LIVE DATA & CACHE ENGINE
+  useEffect(() => {
+    const fetchRates = async () => {
+      setIsLoading(true);
+      setIsOffline(false);
+
+      const cacheKey = `@rates_cache_${baseCurrency}`;
+
+      try {
+        // 1. Attempt to fetch live market data
+        const response = await fetch(`https://api.exchangerate-api.com/v4/latest/${baseCurrency}`);
+        if (!response.ok) throw new Error('Network offline or API down');
+
+        const data = await response.json();
+        setRates(data.rates);
+
+        // 2. Save fresh data to local storage for future offline use
+        await AsyncStorage.setItem(cacheKey, JSON.stringify(data.rates));
+
+      } catch (error) {
+        console.log('Live fetch failed. Attempting to load from offline cache...');
+        setIsOffline(true);
+
+        // 3. If offline, pull from the cache
+        try {
+          const cachedData = await AsyncStorage.getItem(cacheKey);
+          if (cachedData) {
+            setRates(JSON.parse(cachedData));
+          } else {
+            // 4. If no cache exists (first ever load is offline), use absolute fallbacks
+            setRates(ABSOLUTE_FALLBACK_RATES);
+          }
+        } catch (cacheError) {
+          setRates(ABSOLUTE_FALLBACK_RATES);
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchRates();
+  }, [baseCurrency]);
 
   const openPicker = (side: 'base' | 'target') => {
     setSelectingFor(side);
@@ -44,6 +85,9 @@ export default function MainScreen() {
     return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
+  const currentRate = rates[targetCurrency] || 1;
+  const availableCurrencies = Object.keys(rates).length > 0 ? Object.keys(rates) : Object.keys(ABSOLUTE_FALLBACK_RATES);
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
 
@@ -60,26 +104,38 @@ export default function MainScreen() {
             <Text style={styles.targetCurrency}>{targetCurrency}</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Offline Indicator */}
+        {isOffline && (
+          <Text style={styles.offlineText}>• OFFLINE MODE</Text>
+        )}
       </View>
 
-      <ScrollView style={styles.listContainer} showsVerticalScrollIndicator={false}>
-        {AMOUNTS.map((amount) => {
-          const inUSD = amount / RATES[baseCurrency];
-          const converted = inUSD * RATES[targetCurrency];
+      {/* Loading State vs Main List */}
+      {isLoading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#4A90E2" />
+          <Text style={styles.loadingText}>SYNCING MARKET DATA...</Text>
+        </View>
+      ) : (
+        <ScrollView style={styles.listContainer} showsVerticalScrollIndicator={false}>
+          {AMOUNTS.map((amount) => {
+            const converted = amount * currentRate;
 
-          return (
-            <View key={amount} style={styles.row}>
-              <Text style={styles.baseAmount} adjustsFontSizeToFit numberOfLines={1}>
-                {formatAmount(amount, baseCurrency)}
-              </Text>
-              <Text style={styles.targetAmount} adjustsFontSizeToFit numberOfLines={1}>
-                {formatAmount(converted, targetCurrency)}
-              </Text>
-            </View>
-          );
-        })}
-        <View style={{ height: 40 }} />
-      </ScrollView>
+            return (
+              <View key={amount} style={styles.row}>
+                <Text style={styles.baseAmount} adjustsFontSizeToFit numberOfLines={1}>
+                  {formatAmount(amount, baseCurrency)}
+                </Text>
+                <Text style={styles.targetAmount} adjustsFontSizeToFit numberOfLines={1}>
+                  {formatAmount(converted, targetCurrency)}
+                </Text>
+              </View>
+            );
+          })}
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      )}
 
       {/* AdMob Banner Placeholder */}
       <View style={[styles.adContainer, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -97,7 +153,7 @@ export default function MainScreen() {
             </TouchableOpacity>
           </View>
           <FlatList
-            data={Object.keys(RATES)}
+            data={availableCurrencies}
             keyExtractor={(item) => item}
             renderItem={({ item }) => (
               <TouchableOpacity style={styles.modalRow} onPress={() => selectCurrency(item)}>
@@ -117,7 +173,7 @@ const styles = StyleSheet.create({
   header: {
     alignItems: 'center',
     paddingHorizontal: 15,
-    paddingBottom: 25,
+    paddingBottom: 20,
     paddingTop: 10
   },
   appTitle: {
@@ -129,8 +185,27 @@ const styles = StyleSheet.create({
   },
   currencyToggle: { flexDirection: 'row', alignItems: 'center' },
   baseCurrency: { color: '#E9C176', fontSize: 20, fontWeight: '900' },
-  slash: { color: '#4A90E2', fontSize: 20 }, // Updated to Electric Blue
-  targetCurrency: { color: '#4A90E2', fontSize: 20, fontWeight: '900' }, // Updated to Electric Blue
+  slash: { color: '#4A90E2', fontSize: 20 },
+  targetCurrency: { color: '#4A90E2', fontSize: 20, fontWeight: '900' },
+  offlineText: {
+    color: '#FF4444',
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    marginTop: 10,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#666',
+    fontSize: 12,
+    fontWeight: 'bold',
+    letterSpacing: 2,
+    marginTop: 15,
+  },
   listContainer: { flex: 1 },
   row: {
     flexDirection: 'row',
@@ -149,7 +224,7 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'left',
     paddingLeft: 20,
-    color: '#A4C9FF', // Updated to Light Blue
+    color: '#A4C9FF',
     fontSize: 34,
     fontWeight: 'bold'
   },
